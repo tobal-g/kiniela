@@ -9,7 +9,7 @@ const envSchema = z.object({
   API_FOOTBALL_KEY: z.string().min(1).optional(),
   AUTH_SECRET: z.string().min(32),
   CORS_ORIGIN: z.string().min(1).default("http://localhost:3000"),
-  SYNC_ENABLED: z.coerce.boolean().default(false),
+  SYNC_ENABLED: z.enum(["true", "false"]).default("false").transform((value) => value === "true"),
   ADMIN_EMAIL: z.string().email().optional(),
   ADMIN_NAME: z.string().min(1).optional(),
   ADMIN_PASSWORD: z.string().min(12).optional()

@@ -52,6 +52,8 @@ export function buildApp(input: BuildAppInput) {
     origin: input.env.CORS_ORIGIN.split(",").map((origin) => origin.trim())
   });
 
+  // Auth is cookie-based. The frontend should call fetch/axios with credentials
+  // enabled so the browser sends the session cookie on later requests.
   app.addHook("onRequest", async (request) => {
     const token = request.cookies[sessionCookieName];
     const user = token ? await getUserBySession(input.database, token) : null;
@@ -71,6 +73,8 @@ export function buildApp(input: BuildAppInput) {
 
   app.get("/health", async () => ({ ok: true }));
 
+  // Public auth routes. Signup needs an invite code because this is a private
+  // friends game, not an open public app.
   app.post("/auth/signup", async (request, reply) => {
     const body = parseJson(signupSchema, request.body);
     const email = body.email.trim().toLowerCase();
@@ -142,6 +146,8 @@ export function buildApp(input: BuildAppInput) {
     return { user: request.user };
   });
 
+  // Match routes return provider data normalized for the frontend. The raw
+  // API-Football response stays in the database and is not exposed here.
   app.get("/matches", async (request) => {
     requireUser(request.user);
     const allMatches = input.database.db.select().from(matches).orderBy(matches.kickoffAt).all();
@@ -162,6 +168,7 @@ export function buildApp(input: BuildAppInput) {
     const body = parseJson(betSchema, request.body);
     const match = input.database.db.select().from(matches).where(eq(matches.id, params.matchId)).limit(1).get();
     if (!match) throw httpError(404, "Match not found");
+    // Once kickoff has passed, bets cannot be changed.
     if (new Date(match.kickoffAt).getTime() <= Date.now()) throw httpError(409, "Bet is locked");
 
     if (
@@ -174,6 +181,8 @@ export function buildApp(input: BuildAppInput) {
     }
 
     const settings = await getScoringSettings(input.database);
+    // If boosters are disabled in settings, the frontend may still send the
+    // field, but the backend ignores it.
     const boosterUsed = settings.boostersEnabled ? body.boosterUsed : false;
     if (boosterUsed) enforceBoosterLimit(input.database, user.id, params.matchId, settings.boostersPerUser);
 
@@ -267,6 +276,8 @@ export function buildApp(input: BuildAppInput) {
     return { scoringSettings: serializeScoringSettings(await getScoringSettings(input.database)) };
   });
 
+  // Admin routes are for setup and tournament maintenance: invites, scoring
+  // tweaks, users, and syncing the World Cup data provider.
   app.put("/admin/scoring-settings", async (request) => {
     requireAdmin(request.user);
     const body = parseJson(scoringSettingsUpdateSchema, request.body);

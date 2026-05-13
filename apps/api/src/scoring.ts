@@ -19,6 +19,8 @@ export function isFinishedMatch(match: MatchRow): boolean {
 export function scoreBet(bet: BetRow, match: MatchRow, settings: ScoringSettingsRow): ScoreResult | null {
   if (!isFinishedMatch(match) || match.homeGoals === null || match.awayGoals === null) return null;
 
+  // This breakdown is what the frontend can show when explaining why a player
+  // got a certain score for a match.
   const actualOutcome = outcomeFromGoals(match.homeGoals, match.awayGoals);
   const predictedDifference = bet.predictedHomeGoals - bet.predictedAwayGoals;
   const actualDifference = match.homeGoals - match.awayGoals;
