@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import type { Logger } from "pino";
+import { z } from "zod";
 import type { AppDatabase } from "../db/client.js";
 import { matches, scores, syncRuns, teams, bets } from "../db/schema.js";
 import { scoreBet } from "../scoring.js";
@@ -10,58 +11,66 @@ const baseUrl = "https://v3.football.api-sports.io";
 const worldCupLeagueId = 1;
 const worldCupSeason = 2026;
 
-interface ApiFootballFixture {
-  fixture: {
-    id: number;
-    date: string;
-    status: {
-      long: string | null;
-      short: string;
-      elapsed: number | null;
-    };
-  };
-  league: {
-    id: number;
-    season: number;
-    round: string | null;
-  };
-  teams: {
-    home: ApiFootballTeam;
-    away: ApiFootballTeam;
-  };
-  goals: {
-    home: number | null;
-    away: number | null;
-  };
-  score?: {
-    penalty?: {
-      home: number | null;
-      away: number | null;
-    };
-  };
-}
+const apiFootballErrorsSchema = z.union([z.array(z.unknown()), z.record(z.string(), z.unknown())]);
+const apiFootballScoreSchema = z.object({
+  home: z.number().int().nullable(),
+  away: z.number().int().nullable()
+});
+const apiFootballFixtureSchema = z.object({
+  fixture: z.object({
+    id: z.number().int(),
+    date: z.string(),
+    status: z.object({
+      long: z.string().nullable(),
+      short: z.string(),
+      elapsed: z.number().int().nullable()
+    })
+  }),
+  league: z.object({
+    id: z.number().int(),
+    season: z.number().int(),
+    round: z.string().nullable()
+  }),
+  teams: z.object({
+    home: z.object({
+      id: z.number().int(),
+      name: z.string(),
+      logo: z.string().nullable(),
+      winner: z.boolean().nullable().optional()
+    }),
+    away: z.object({
+      id: z.number().int(),
+      name: z.string(),
+      logo: z.string().nullable(),
+      winner: z.boolean().nullable().optional()
+    })
+  }),
+  goals: apiFootballScoreSchema,
+  score: z
+    .object({
+      penalty: apiFootballScoreSchema.optional()
+    })
+    .optional()
+});
+const apiFootballFixturesResponseSchema = z.object({
+  errors: apiFootballErrorsSchema.optional(),
+  response: z.array(apiFootballFixtureSchema)
+});
+const apiFootballTeamsResponseSchema = z.object({
+  errors: apiFootballErrorsSchema.optional(),
+  response: z.array(
+    z.object({
+      team: z.object({
+        id: z.number().int(),
+        name: z.string(),
+        country: z.string().nullable(),
+        logo: z.string().nullable()
+      })
+    })
+  )
+});
 
-interface ApiFootballTeam {
-  id: number;
-  name: string;
-  logo: string | null;
-  winner?: boolean | null;
-}
-
-interface ApiFootballFixturesResponse {
-  response: ApiFootballFixture[];
-}
-
-interface ApiFootballTeamsResponse {
-  response: Array<{
-    team: {
-      id: number;
-      name: string;
-      country: string | null;
-      logo: string | null;
-    };
-  }>;
-}
+type ApiFootballFixture = z.infer<typeof apiFootballFixtureSchema>;
 
 export async function syncWorldCupFixtures(input: {
   database: AppDatabase;
@@ -73,8 +82,8 @@ export async function syncWorldCupFixtures(input: {
   const fetchImpl = input.fetchImpl ?? fetch;
 
   try {
-    const teamsJson = await fetchApiFootball<ApiFootballTeamsResponse>(fetchImpl, input.apiKey, "teams");
-    const fixturesJson = await fetchApiFootball<ApiFootballFixturesResponse>(fetchImpl, input.apiKey, "fixtures");
+    const teamsJson = await fetchApiFootball(fetchImpl, input.apiKey, "teams", apiFootballTeamsResponseSchema);
+    const fixturesJson = await fetchApiFootball(fetchImpl, input.apiKey, "fixtures", apiFootballFixturesResponseSchema);
     const now = new Date().toISOString();
 
     input.database.sqlite.transaction(() => {
@@ -102,7 +111,12 @@ export async function syncWorldCupFixtures(input: {
   }
 }
 
-async function fetchApiFootball<T>(fetchImpl: typeof fetch, apiKey: string, resource: "fixtures" | "teams"): Promise<T> {
+async function fetchApiFootball<T>(
+  fetchImpl: typeof fetch,
+  apiKey: string,
+  resource: "fixtures" | "teams",
+  schema: z.ZodType<T>
+): Promise<T> {
   const url = new URL(`${baseUrl}/${resource}`);
   url.searchParams.set("league", String(worldCupLeagueId));
   url.searchParams.set("season", String(worldCupSeason));
@@ -114,7 +128,18 @@ async function fetchApiFootball<T>(fetchImpl: typeof fetch, apiKey: string, reso
   });
 
   if (!response.ok) throw new Error(`API-Football ${resource} request failed with status ${response.status}`);
-  return (await response.json()) as T;
+  const payload: unknown = await response.json();
+  const parsed = schema.safeParse(payload);
+  if (!parsed.success) throw new Error(`API-Football ${resource} response is missing required fields`);
+
+  const errors = (parsed.data as { errors?: unknown[] | Record<string, unknown> }).errors;
+  if (errors && (Array.isArray(errors) ? errors.length > 0 : Object.keys(errors).length > 0)) {
+    throw new Error(`API-Football ${resource} response contains provider errors`);
+  }
+
+  // Return the unmodified payload so raw fixture storage still includes fields
+  // that are not part of the application's required contract.
+  return payload as T;
 }
 
 function upsertTeam(
@@ -247,7 +272,10 @@ export async function recalculateFinishedScores(database: AppDatabase): Promise<
     const match = database.db.select().from(matches).where(eq(matches.id, bet.matchId)).limit(1).get();
     if (!match) continue;
     const result = scoreBet(bet, match);
-    if (!result) continue;
+    if (!result) {
+      database.db.delete(scores).where(and(eq(scores.userId, bet.userId), eq(scores.matchId, bet.matchId))).run();
+      continue;
+    }
 
     const row = {
       id: randomUUID(),
