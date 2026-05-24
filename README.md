@@ -1,6 +1,6 @@
 # Kiniela
 
-Backend for a private World Cup quiniela with friends. The app manages users, invite-only signup, World Cup fixtures, player bets, scoring rules, boosters, and the leaderboard.
+Backend for a private World Cup quiniela with friends. The app manages users, invite-only signup, World Cup fixtures, player bets, fixed scoring rules, and the leaderboard.
 
 The frontend is not built yet. This README documents the current API contract and the backend journey so a frontend can be built against it.
 
@@ -31,7 +31,7 @@ pnpm --filter @kiniela/api admin:create
 pnpm dev:api
 ```
 
-Fill `.env` before creating the admin user. The admin script reads `ADMIN_EMAIL`, `ADMIN_NAME`, and `ADMIN_PASSWORD`, hashes the password, and creates or updates that admin in the SQLite database.
+Fill `.env` before creating the admin user. The admin script reads `ADMIN_NAME` and `ADMIN_PASSWORD`, hashes the password, and creates or updates that admin in the SQLite database.
 
 By default the API runs on:
 
@@ -51,8 +51,7 @@ http://localhost:3001
 | `AUTH_SECRET` | Yes | Required by env validation. Keep it random and private. |
 | `CORS_ORIGIN` | No | Comma-separated allowed frontend origins. Defaults to `http://localhost:3000`. |
 | `SYNC_ENABLED` | No | When `true`, syncs fixtures on server start and every 6 hours. |
-| `ADMIN_EMAIL` | Admin script only | Initial admin email. |
-| `ADMIN_NAME` | Admin script only | Initial admin display name. |
+| `ADMIN_NAME` | Admin script only | Initial admin login and display name. |
 | `ADMIN_PASSWORD` | Admin script only | Initial admin password. Minimum 12 characters. |
 
 For Railway with SQLite, use a persistent volume and set `DATABASE_URL` to that mounted path, for example:
@@ -82,7 +81,7 @@ pnpm --filter @kiniela/api admin:create
 
 1. **Owner configures the backend**
 
-   The owner creates `.env`, runs migrations, and creates the first admin user. The database starts with default scoring settings.
+   The owner creates `.env`, runs migrations, and creates the first admin user. Scoring uses the fixed `1/2/3` point rules described below.
 
 2. **Admin syncs World Cup data**
 
@@ -94,7 +93,7 @@ pnpm --filter @kiniela/api admin:create
 
 4. **Friend signs up**
 
-   The frontend sends email, name, password, and invite code to `POST /auth/signup`. The backend validates the invite, hashes the password with Argon2id, creates the user, increments invite usage, creates a session, and sets an HTTP-only session cookie.
+   The frontend sends name, password, and invite code to `POST /auth/signup`. The backend validates the invite, hashes the password with Argon2id, creates the user, increments invite usage, creates a session, and sets an HTTP-only session cookie.
 
 5. **Frontend restores the session**
 
@@ -102,11 +101,11 @@ pnpm --filter @kiniela/api admin:create
 
 6. **Player sees matches and current bets**
 
-   The frontend loads `GET /matches`, `GET /bets/me`, `GET /scoring-settings`, and `GET /leaderboard`. Merge bets by `matchId` on the client so each match card can show the user's saved prediction.
+   The frontend loads `GET /matches`, `GET /bets/me`, `GET /scores/me`, `GET /scoring-rules`, and `GET /leaderboard`. Merge bets and scores by `matchId` so each match card can show the saved prediction and any awarded points.
 
 7. **Player places or edits bets**
 
-   The frontend calls `PUT /bets/:matchId` before kickoff. The player sends predicted home/away goals, optional knockout advancer, and optional booster use. The backend derives `predictedOutcome` from the goals and upserts the bet.
+   The frontend calls `PUT /bets/:matchId` before kickoff. The player sends predicted home/away goals and, for knockout matches, the selected advancing team. The backend derives `predictedOutcome` from the goals and upserts the bet.
 
 8. **Bets lock at kickoff**
 
@@ -114,11 +113,11 @@ pnpm --filter @kiniela/api admin:create
 
 9. **Finished matches are scored**
 
-   After fixture sync updates a match to a finished provider status (`FT`, `AET`, or `PEN`), the backend recalculates scores for finished matches. Admin scoring changes also trigger recalculation.
+   After fixture sync updates a match to a finished provider status (`FT`, `AET`, or `PEN`), the backend recalculates scores for finished matches.
 
 10. **Leaderboard updates**
 
-   `GET /leaderboard` ranks players by total points, then exact scores, then correct outcomes, then name.
+   `GET /leaderboard` ranks players by total points, then exact scores, then correct results, then name.
 
 ## Auth Model
 
@@ -173,7 +172,7 @@ Common status codes:
 - `401` - not logged in.
 - `403` - logged in but not admin.
 - `404` - requested match was not found.
-- `409` - duplicate signup email, locked bet, or booster limit reached.
+- `409` - duplicate signup name or locked bet.
 - `500` - unexpected server error.
 
 ## Endpoints
@@ -189,9 +188,9 @@ Common status codes:
 | `GET` | `/matches/:id` | User | Return one match. |
 | `PUT` | `/bets/:matchId` | User | Create or update the current user's bet for a match. |
 | `GET` | `/bets/me` | User | Return all bets for the current user. |
+| `GET` | `/scores/me` | User | Return calculated per-match points for the current user. |
 | `GET` | `/leaderboard` | User | Return ranked player leaderboard. |
-| `GET` | `/scoring-settings` | User | Return current scoring settings. |
-| `PUT` | `/admin/scoring-settings` | Admin | Update scoring settings and recalculate scores. |
+| `GET` | `/scoring-rules` | User | Return fixed scoring points. |
 | `POST` | `/admin/invites` | Admin | Create invite code. |
 | `GET` | `/admin/users` | Admin | List users. |
 | `POST` | `/admin/sync/fixtures` | Admin | Sync teams and fixtures from API-Football. |
@@ -204,7 +203,6 @@ Request:
 
 ```json
 {
-  "email": "friend@example.com",
   "name": "Friend",
   "password": "friend-password-123",
   "inviteCode": "invite-code-from-admin"
@@ -213,8 +211,8 @@ Request:
 
 Rules:
 
-- `email` must be valid and is stored lowercase.
-- `name` must be 1 to 120 characters.
+- `name` must be 1 to 120 characters and is used for login.
+- Names are unique without regard to capitalization (`Friend` and `friend` are the same account name).
 - `password` must be 12 to 256 characters.
 - `inviteCode` must be 12 to 128 characters.
 - Invite must exist, not be expired, and not exceed `maxUses`.
@@ -225,7 +223,6 @@ Response:
 {
   "user": {
     "id": "user-id",
-    "email": "friend@example.com",
     "name": "Friend",
     "role": "player"
   }
@@ -238,7 +235,7 @@ Request:
 
 ```json
 {
-  "email": "friend@example.com",
+  "name": "Friend",
   "password": "friend-password-123"
 }
 ```
@@ -257,7 +254,6 @@ Response:
 {
   "user": {
     "id": "user-id",
-    "email": "friend@example.com",
     "name": "Friend",
     "role": "player"
   }
@@ -321,7 +317,6 @@ Returns the current user's saved bets:
       "predictedAwayGoals": 1,
       "predictedOutcome": "HOME",
       "predictedAdvancerTeamId": null,
-      "boosterUsed": false,
       "createdAt": "2026-05-01T12:00:00.000Z",
       "updatedAt": "2026-05-01T12:00:00.000Z"
     }
@@ -337,8 +332,7 @@ Request:
 {
   "predictedHomeGoals": 2,
   "predictedAwayGoals": 1,
-  "predictedAdvancerTeamId": null,
-  "boosterUsed": false
+  "predictedAdvancerTeamId": null
 }
 ```
 
@@ -346,10 +340,11 @@ Rules:
 
 - Goal predictions must be integers from `0` to `30`.
 - `predictedOutcome` is calculated by the backend from the goal predictions.
-- `predictedAdvancerTeamId` can be omitted or `null`.
-- For knockout matches, `predictedAdvancerTeamId` must be one of the match teams if provided.
-- If boosters are disabled, `boosterUsed` is ignored and stored as `false`.
-- If boosters are enabled, the backend enforces `boostersPerUser`.
+- Group-stage predictions must omit `predictedAdvancerTeamId` or set it to `null`.
+- Knockout predictions must set `predictedAdvancerTeamId` to one of the match teams.
+- A non-tied knockout score must select the team leading that predicted score as the advancer.
+- A tied knockout score may select either team as the predicted penalty-shootout advancer.
+- Predictions are rejected until the stage and both participating teams are known.
 - A user has one bet per match. Calling this route again before kickoff updates the existing bet.
 
 Response:
@@ -364,7 +359,6 @@ Response:
     "predictedAwayGoals": 1,
     "predictedOutcome": "HOME",
     "predictedAdvancerTeamId": null,
-    "boosterUsed": false,
     "createdAt": "2026-05-01T12:00:00.000Z",
     "updatedAt": "2026-05-01T12:00:00.000Z"
   }
@@ -376,77 +370,64 @@ Frontend betting UI should:
 - Disable editing when `new Date(match.kickoffAt).getTime() <= Date.now()`.
 - Still handle a `409` from the backend because the backend is authoritative.
 - Show an advancer picker only when `match.stage === "knockout"` and both teams are known.
-- Show booster controls only when `scoringSettings.boostersEnabled` is true.
-- Track booster usage from `/bets/me` so the user understands how many are left.
+- For a tied knockout prediction, describe the selected advancer as advancing on penalties.
 
 ## Scoring And Winning
 
 Scoring happens after a match is finished and has final goals. Finished provider statuses are `FT`, `AET`, and `PEN`.
+The simplified-scoring migration removes previously calculated additive totals; run fixture synchronization afterward to recalculate any already-finished matches under these rules.
 
-Default scoring settings from the initial migration:
+Fixed scoring rules:
 
-| Rule | Default points |
+| Prediction quality | Points |
 | --- | ---: |
-| Correct outcome | 4 |
-| Exact score | 4 |
-| Correct goal difference | 2 |
-| Exact home goals | 1 |
-| Exact away goals | 1 |
-| Exact total goals | 1 |
-| Knockout advancer | 2 |
-| Group-stage max | 10 |
-| Knockout max | 12 |
-| Boosters enabled | false |
-| Boosters per user | 3 |
-| Booster multiplier | 2 |
+| Correct result | 1 |
+| Correct result and exact goal difference | 2 |
+| Correct result and exact score | 3 |
 
 How points are calculated:
 
-- Outcome is `HOME`, `DRAW`, or `AWAY`.
-- Exact score can earn outcome, exact score, and goal-difference points.
-- Partial points can still be awarded even when the outcome is wrong, for example exact away goals.
-- Knockout matches can award an advancer bonus when `winnerTeamId` matches `predictedAdvancerTeamId`.
-- The subtotal is capped by stage (`groupStageMaxPoints` or `knockoutMaxPoints`).
-- If boosters are enabled and the bet used a booster, positive capped scores are multiplied.
+- Points are exclusive tiers, not additive bonuses; a prediction scores at most `3`.
+- In a group match, the result is `HOME`, `DRAW`, or `AWAY`.
+- In a knockout match, the result is the team that advances. Final playing-time scores can be tied when the team advances on penalties.
+- Predicted and actual score totals exclude penalty shootout goals.
+- A non-exact correct draw earns `2` points because its goal difference is exactly `0`.
 
-Current API limitation: per-match score breakdowns are calculated and stored internally, but there is no endpoint yet that returns each user's score breakdown for each match. The frontend can show aggregate leaderboard data today. If the UI should explain "why did I get these points?" per match, add a read endpoint for the `scores.breakdown_json` data.
-
-### `GET /scoring-settings`
+### `GET /scoring-rules`
 
 Use this instead of hard-coding scoring copy in the frontend.
 
 ```json
 {
-  "scoringSettings": {
-    "correctOutcomePoints": 4,
-    "exactScorePoints": 4,
+  "scoringRules": {
+    "correctResultPoints": 1,
     "correctGoalDifferencePoints": 2,
-    "exactHomeGoalsPoints": 1,
-    "exactAwayGoalsPoints": 1,
-    "exactTotalGoalsPoints": 1,
-    "knockoutAdvancerPoints": 2,
-    "groupStageMaxPoints": 10,
-    "knockoutMaxPoints": 12,
-    "boostersEnabled": false,
-    "boostersPerUser": 3,
-    "boosterMultiplier": 2,
-    "updatedAt": "2026-05-01T12:00:00.000Z"
+    "exactScorePoints": 3
   }
 }
 ```
 
-### `PUT /admin/scoring-settings`
+### `GET /scores/me`
 
-Admins can send any subset of scoring settings:
+Returns points and an explanation for each calculated player result:
 
 ```json
 {
-  "exactScorePoints": 8,
-  "boostersEnabled": true
+  "scores": [
+    {
+      "matchId": 100,
+      "totalPoints": 3,
+      "breakdown": {
+        "tier": "exactScore",
+        "correctResult": true,
+        "correctGoalDifference": true,
+        "exactScore": true
+      },
+      "calculatedAt": "2026-06-11T22:00:00.000Z"
+    }
+  ]
 }
 ```
-
-The backend updates settings and recalculates finished-match scores.
 
 ## Leaderboard
 
@@ -460,13 +441,12 @@ Returns:
     {
       "user": {
         "id": "user-id",
-        "email": "friend@example.com",
         "name": "Friend",
         "role": "player"
       },
-      "totalPoints": 20,
+      "totalPoints": 12,
       "exactScores": 2,
-      "correctOutcomes": 4,
+      "correctResults": 4,
       "playedMatches": 5
     }
   ]
@@ -477,10 +457,8 @@ Sorting:
 
 1. Highest `totalPoints`.
 2. Highest `exactScores`.
-3. Highest `correctOutcomes`.
+3. Highest `correctResults`.
 4. Alphabetical `user.name`.
-
-Frontend note: the current API includes player email in `leaderboard[].user.email` because it reuses the public user DTO. If emails should not be shown in the UI, hide them client-side or adjust the backend DTO before launch.
 
 ## Admin Endpoints
 
@@ -527,7 +505,6 @@ Returns:
   "users": [
     {
       "id": "user-id",
-      "email": "friend@example.com",
       "name": "Friend",
       "role": "player"
     }
@@ -566,8 +543,9 @@ import type {
   BetDto,
   LeaderboardEntryDto,
   MatchDto,
+  PlayerScoreDto,
   PublicUser,
-  ScoringSettingsDto
+  ScoringRulesDto
 } from "@kiniela/shared";
 ```
 
@@ -575,9 +553,9 @@ Suggested app boot flow:
 
 1. Call `GET /auth/me`.
 2. If `401`, show login/signup.
-3. If logged in, load `GET /matches`, `GET /bets/me`, `GET /scoring-settings`, and `GET /leaderboard`.
-4. Merge matches and bets by `match.id === bet.matchId`.
-5. For admins, show invite creation, user list, scoring settings, and sync controls.
+3. If logged in, load `GET /matches`, `GET /bets/me`, `GET /scores/me`, `GET /scoring-rules`, and `GET /leaderboard`.
+4. Merge matches, bets, and scores by `matchId`.
+5. For admins, show invite creation, user list, and sync controls.
 
 Suggested main screens:
 
@@ -586,8 +564,8 @@ Suggested main screens:
 - Match list with status, kickoff, teams, current prediction, and lock state.
 - Bet editor modal or inline form.
 - Leaderboard.
-- Rules/scoring view sourced from `/scoring-settings`.
-- Admin panel for invites, fixture sync, users, and scoring settings.
+- Rules/scoring view sourced from `/scoring-rules`.
+- Admin panel for invites, fixture sync, and users.
 
 Important frontend details:
 

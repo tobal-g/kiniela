@@ -1,26 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { scoreBet } from "../src/scoring.js";
-import type { BetRow, MatchRow, ScoringSettingsRow } from "../src/db/schema.js";
+import type { BetRow, MatchRow } from "../src/db/schema.js";
 
-const settings: ScoringSettingsRow = {
-  id: 1,
-  correctOutcomePoints: 4,
-  exactScorePoints: 4,
-  correctGoalDifferencePoints: 2,
-  exactHomeGoalsPoints: 1,
-  exactAwayGoalsPoints: 1,
-  exactTotalGoalsPoints: 1,
-  knockoutAdvancerPoints: 2,
-  groupStageMaxPoints: 10,
-  knockoutMaxPoints: 12,
-  boostersEnabled: false,
-  boostersPerUser: 3,
-  boosterMultiplier: 2,
-  updatedAt: new Date().toISOString()
-};
-
-function match(overrides: Partial<MatchRow>): MatchRow {
+function match(overrides: Partial<MatchRow> = {}): MatchRow {
   return {
     id: 1,
     leagueId: 1,
@@ -44,7 +27,7 @@ function match(overrides: Partial<MatchRow>): MatchRow {
   };
 }
 
-function bet(overrides: Partial<BetRow>): BetRow {
+function bet(overrides: Partial<BetRow> = {}): BetRow {
   return {
     id: "bet-1",
     userId: "user-1",
@@ -53,67 +36,92 @@ function bet(overrides: Partial<BetRow>): BetRow {
     predictedAwayGoals: 1,
     predictedOutcome: "HOME",
     predictedAdvancerTeamId: null,
-    boosterUsed: false,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     ...overrides
   };
 }
 
-test("exact score gets outcome, exact score, and goal difference points", () => {
-  const result = scoreBet(bet({}), match({}), settings);
-  assert.equal(result?.totalPoints, 10);
-  assert.equal(result?.breakdown.correctOutcome, 4);
-  assert.equal(result?.breakdown.exactScore, 4);
-  assert.equal(result?.breakdown.correctGoalDifference, 2);
+test("a correct winner without the exact margin scores one point", () => {
+  const result = scoreBet(bet({ predictedHomeGoals: 3, predictedAwayGoals: 0 }), match());
+  assert.deepEqual(result, {
+    totalPoints: 1,
+    breakdown: {
+      tier: "correctResult",
+      correctResult: true,
+      correctGoalDifference: false,
+      exactScore: false
+    }
+  });
 });
 
-test("partial points can be awarded without the correct outcome", () => {
-  const result = scoreBet(
-    bet({ predictedHomeGoals: 0, predictedAwayGoals: 1, predictedOutcome: "AWAY" }),
-    match({}),
-    settings
-  );
-  assert.equal(result?.totalPoints, 1);
-  assert.equal(result?.breakdown.exactAwayGoals, 1);
+test("a correct winner and exact goal difference score two points", () => {
+  const result = scoreBet(bet({ predictedHomeGoals: 4, predictedAwayGoals: 3 }), match());
+  assert.equal(result?.totalPoints, 2);
+  assert.equal(result?.breakdown.tier, "correctGoalDifference");
 });
 
-test("draw predictions are scored as their own outcome", () => {
+test("an exact score scores three points", () => {
+  const result = scoreBet(bet(), match());
+  assert.equal(result?.totalPoints, 3);
+  assert.equal(result?.breakdown.tier, "exactScore");
+  assert.equal(result?.breakdown.exactScore, true);
+});
+
+test("a wrong result scores no points even when one team goal is exact", () => {
+  const result = scoreBet(bet({ predictedHomeGoals: 0, predictedAwayGoals: 1, predictedOutcome: "AWAY" }), match());
+  assert.equal(result?.totalPoints, 0);
+  assert.equal(result?.breakdown.tier, "none");
+});
+
+test("a non-exact draw has the correct zero goal difference", () => {
   const result = scoreBet(
     bet({ predictedHomeGoals: 2, predictedAwayGoals: 2, predictedOutcome: "DRAW" }),
-    match({ homeGoals: 1, awayGoals: 1, winnerTeamId: null }),
-    settings
+    match({ homeGoals: 1, awayGoals: 1, winnerTeamId: null })
   );
-  assert.equal(result?.totalPoints, 6);
-  assert.equal(result?.breakdown.correctOutcome, 4);
-  assert.equal(result?.breakdown.correctGoalDifference, 2);
+  assert.equal(result?.totalPoints, 2);
+  assert.equal(result?.breakdown.tier, "correctGoalDifference");
 });
 
-test("knockout advancer bonus applies after a winner is known", () => {
-  const result = scoreBet(
-    bet({ predictedAdvancerTeamId: 10 }),
-    match({ stage: "knockout", round: "Final" }),
-    settings
+test("knockout scoring uses the advancing team before score precision", () => {
+  const penaltyMatch = match({
+    stage: "knockout",
+    round: "Quarter-finals",
+    statusShort: "PEN",
+    homeGoals: 1,
+    awayGoals: 1,
+    homePenaltyGoals: 4,
+    awayPenaltyGoals: 3,
+    winnerTeamId: 10
+  });
+
+  assert.equal(
+    scoreBet(bet({ predictedHomeGoals: 2, predictedAwayGoals: 1, predictedAdvancerTeamId: 10 }), penaltyMatch)?.totalPoints,
+    1
   );
-  assert.equal(result?.totalPoints, 12);
-  assert.equal(result?.breakdown.knockoutAdvancer, 2);
+  assert.equal(
+    scoreBet(
+      bet({ predictedHomeGoals: 0, predictedAwayGoals: 0, predictedOutcome: "DRAW", predictedAdvancerTeamId: 10 }),
+      penaltyMatch
+    )?.totalPoints,
+    2
+  );
+  assert.equal(
+    scoreBet(
+      bet({ predictedHomeGoals: 1, predictedAwayGoals: 1, predictedOutcome: "DRAW", predictedAdvancerTeamId: 10 }),
+      penaltyMatch
+    )?.totalPoints,
+    3
+  );
+  assert.equal(
+    scoreBet(
+      bet({ predictedHomeGoals: 1, predictedAwayGoals: 1, predictedOutcome: "DRAW", predictedAdvancerTeamId: 20 }),
+      penaltyMatch
+    )?.totalPoints,
+    0
+  );
 });
 
-test("scoring figures are configurable", () => {
-  const result = scoreBet(
-    bet({}),
-    match({}),
-    { ...settings, exactScorePoints: 8, groupStageMaxPoints: 20 }
-  );
-  assert.equal(result?.totalPoints, 14);
-});
-
-test("boosters multiply positive capped scores when enabled", () => {
-  const result = scoreBet(
-    bet({ boosterUsed: true }),
-    match({}),
-    { ...settings, boostersEnabled: true }
-  );
-  assert.equal(result?.totalPoints, 20);
-  assert.equal(result?.breakdown.boosterMultiplier, 2);
+test("a knockout match is not scored until an advancing team is known", () => {
+  assert.equal(scoreBet(bet({ predictedAdvancerTeamId: 10 }), match({ stage: "knockout", winnerTeamId: null })), null);
 });

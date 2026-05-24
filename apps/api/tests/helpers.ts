@@ -13,7 +13,6 @@ export function testEnv(overrides: Partial<Env> = {}): Env {
     AUTH_SECRET: "test-auth-secret-with-more-than-32-chars",
     CORS_ORIGIN: "http://localhost:3000",
     SYNC_ENABLED: false,
-    ADMIN_EMAIL: undefined,
     ADMIN_NAME: undefined,
     ADMIN_PASSWORD: undefined,
     ...overrides

@@ -2,8 +2,7 @@ import { integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core
 
 export const users = sqliteTable("users", {
   id: text("id").primaryKey(),
-  email: text("email").notNull().unique(),
-  name: text("name").notNull(),
+  name: text("name").notNull().unique(),
   passwordHash: text("password_hash").notNull(),
   role: text("role", { enum: ["admin", "player"] }).notNull().default("player"),
   createdAt: text("created_at").notNull(),
@@ -70,29 +69,11 @@ export const bets = sqliteTable(
     predictedAwayGoals: integer("predicted_away_goals").notNull(),
     predictedOutcome: text("predicted_outcome", { enum: ["HOME", "DRAW", "AWAY"] }).notNull(),
     predictedAdvancerTeamId: integer("predicted_advancer_team_id"),
-    boosterUsed: integer("booster_used", { mode: "boolean" }).notNull().default(false),
     createdAt: text("created_at").notNull(),
     updatedAt: text("updated_at").notNull()
   },
   (table) => [uniqueIndex("bets_user_match_unique").on(table.userId, table.matchId)]
 );
-
-export const scoringSettings = sqliteTable("scoring_settings", {
-  id: integer("id").primaryKey(),
-  correctOutcomePoints: integer("correct_outcome_points").notNull(),
-  exactScorePoints: integer("exact_score_points").notNull(),
-  correctGoalDifferencePoints: integer("correct_goal_difference_points").notNull(),
-  exactHomeGoalsPoints: integer("exact_home_goals_points").notNull(),
-  exactAwayGoalsPoints: integer("exact_away_goals_points").notNull(),
-  exactTotalGoalsPoints: integer("exact_total_goals_points").notNull(),
-  knockoutAdvancerPoints: integer("knockout_advancer_points").notNull(),
-  groupStageMaxPoints: integer("group_stage_max_points").notNull(),
-  knockoutMaxPoints: integer("knockout_max_points").notNull(),
-  boostersEnabled: integer("boosters_enabled", { mode: "boolean" }).notNull(),
-  boostersPerUser: integer("boosters_per_user").notNull(),
-  boosterMultiplier: integer("booster_multiplier").notNull(),
-  updatedAt: text("updated_at").notNull()
-});
 
 export const scores = sqliteTable(
   "scores",
@@ -119,4 +100,3 @@ export const syncRuns = sqliteTable("sync_runs", {
 export type UserRow = typeof users.$inferSelect;
 export type MatchRow = typeof matches.$inferSelect;
 export type BetRow = typeof bets.$inferSelect;
-export type ScoringSettingsRow = typeof scoringSettings.$inferSelect;

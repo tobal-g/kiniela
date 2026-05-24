@@ -6,7 +6,6 @@ export type MatchStage = "group" | "knockout" | "unknown";
 
 export interface PublicUser {
   id: string;
-  email: string;
   name: string;
   role: Role;
 }
@@ -46,49 +45,38 @@ export interface BetDto {
   predictedHomeGoals: number;
   predictedAwayGoals: number;
   predictedOutcome: MatchOutcome;
-  // Only useful for knockout matches. Null is fine for group-stage bets.
+  // Required for knockout matches and null for group-stage bets.
   predictedAdvancerTeamId: number | null;
-  boosterUsed: boolean;
   createdAt: string;
   updatedAt: string;
 }
 
-export interface ScoringSettingsDto {
-  // These numbers are editable by admins, so the frontend should read them
-  // from the API instead of hard-coding the point values.
-  correctOutcomePoints: number;
-  exactScorePoints: number;
+export interface ScoringRulesDto {
+  correctResultPoints: number;
   correctGoalDifferencePoints: number;
-  exactHomeGoalsPoints: number;
-  exactAwayGoalsPoints: number;
-  exactTotalGoalsPoints: number;
-  knockoutAdvancerPoints: number;
-  groupStageMaxPoints: number;
-  knockoutMaxPoints: number;
-  boostersEnabled: boolean;
-  boostersPerUser: number;
-  boosterMultiplier: number;
-  updatedAt: string;
+  exactScorePoints: number;
 }
 
+export type ScoreTier = "none" | "correctResult" | "correctGoalDifference" | "exactScore";
+
 export interface ScoreBreakdownDto {
-  // Values are the points earned for each part of a bet.
-  // Zero means that part of the prediction did not score.
-  correctOutcome: number;
-  exactScore: number;
-  correctGoalDifference: number;
-  exactHomeGoals: number;
-  exactAwayGoals: number;
-  exactTotalGoals: number;
-  knockoutAdvancer: number;
-  capApplied: number | null;
-  boosterMultiplier: number;
+  tier: ScoreTier;
+  correctResult: boolean;
+  correctGoalDifference: boolean;
+  exactScore: boolean;
+}
+
+export interface PlayerScoreDto {
+  matchId: number;
+  totalPoints: number;
+  breakdown: ScoreBreakdownDto;
+  calculatedAt: string;
 }
 
 export interface LeaderboardEntryDto {
   user: PublicUser;
   totalPoints: number;
   exactScores: number;
-  correctOutcomes: number;
+  correctResults: number;
   playedMatches: number;
 }

@@ -3,7 +3,6 @@ import { eq } from "drizzle-orm";
 import type { Logger } from "pino";
 import type { AppDatabase } from "../db/client.js";
 import { matches, scores, syncRuns, teams, bets } from "../db/schema.js";
-import { getScoringSettings } from "../scoringSettings.js";
 import { scoreBet } from "../scoring.js";
 import { safeErrorMessage } from "../logging.js";
 
@@ -242,13 +241,12 @@ async function recordSyncRun(
 }
 
 export async function recalculateFinishedScores(database: AppDatabase): Promise<void> {
-  const settings = await getScoringSettings(database);
   const allBets = database.db.select().from(bets).all();
 
   for (const bet of allBets) {
     const match = database.db.select().from(matches).where(eq(matches.id, bet.matchId)).limit(1).get();
     if (!match) continue;
-    const result = scoreBet(bet, match, settings);
+    const result = scoreBet(bet, match);
     if (!result) continue;
 
     const row = {

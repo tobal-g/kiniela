@@ -1,13 +1,18 @@
 import type Database from "better-sqlite3";
 
-const migrations = [
+interface Migration {
+  id: string;
+  sql: string;
+  disableForeignKeys?: boolean;
+}
+
+const migrations: Migration[] = [
   {
     id: "001_initial",
     sql: `
       CREATE TABLE IF NOT EXISTS users (
         id TEXT PRIMARY KEY,
-        email TEXT NOT NULL UNIQUE,
-        name TEXT NOT NULL,
+        name TEXT NOT NULL COLLATE NOCASE UNIQUE,
         password_hash TEXT NOT NULL,
         role TEXT NOT NULL DEFAULT 'player' CHECK (role IN ('admin', 'player')),
         created_at TEXT NOT NULL,
@@ -144,6 +149,78 @@ const migrations = [
       VALUES (1, 4, 4, 2, 1, 1, 1, 2, 10, 12, 0, 3, 2, datetime('now'))
       ON CONFLICT(id) DO NOTHING;
     `
+  },
+  {
+    id: "002_name_based_login",
+    disableForeignKeys: true,
+    sql: `
+      CREATE TABLE users_without_email (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+        password_hash TEXT NOT NULL,
+        role TEXT NOT NULL DEFAULT 'player' CHECK (role IN ('admin', 'player')),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      INSERT INTO users_without_email (id, name, password_hash, role, created_at, updated_at)
+      SELECT id, name, password_hash, role, created_at, updated_at
+      FROM users;
+
+      DROP TABLE users;
+      ALTER TABLE users_without_email RENAME TO users;
+    `
+  },
+  {
+    id: "003_simplified_scoring",
+    disableForeignKeys: true,
+    sql: `
+      CREATE TABLE bets_simplified_scoring (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        match_id INTEGER NOT NULL,
+        predicted_home_goals INTEGER NOT NULL CHECK (predicted_home_goals >= 0),
+        predicted_away_goals INTEGER NOT NULL CHECK (predicted_away_goals >= 0),
+        predicted_outcome TEXT NOT NULL CHECK (predicted_outcome IN ('HOME', 'DRAW', 'AWAY')),
+        predicted_advancer_team_id INTEGER,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE (user_id, match_id),
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+        FOREIGN KEY (match_id) REFERENCES matches(id) ON DELETE CASCADE,
+        FOREIGN KEY (predicted_advancer_team_id) REFERENCES teams(id)
+      );
+
+      INSERT INTO bets_simplified_scoring (
+        id,
+        user_id,
+        match_id,
+        predicted_home_goals,
+        predicted_away_goals,
+        predicted_outcome,
+        predicted_advancer_team_id,
+        created_at,
+        updated_at
+      )
+      SELECT
+        id,
+        user_id,
+        match_id,
+        predicted_home_goals,
+        predicted_away_goals,
+        predicted_outcome,
+        predicted_advancer_team_id,
+        created_at,
+        updated_at
+      FROM bets;
+
+      DROP TABLE bets;
+      ALTER TABLE bets_simplified_scoring RENAME TO bets;
+      DROP TABLE scoring_settings;
+
+      -- Stored scores were calculated under the replaced additive rule set.
+      DELETE FROM scores;
+    `
   }
 ];
 
@@ -154,9 +231,18 @@ export function runMigrations(sqlite: Database.Database): void {
 
   for (const migration of migrations) {
     if (appliedSet.has(migration.id)) continue;
-    sqlite.transaction(() => {
-      sqlite.exec(migration.sql);
-      sqlite.prepare("INSERT INTO _migrations (id, applied_at) VALUES (?, ?)").run(migration.id, new Date().toISOString());
-    })();
+    if (migration.disableForeignKeys) sqlite.pragma("foreign_keys = OFF");
+    try {
+      sqlite.transaction(() => {
+        sqlite.exec(migration.sql);
+        if (migration.disableForeignKeys) {
+          const violations = sqlite.pragma("foreign_key_check") as unknown[];
+          if (violations.length > 0) throw new Error(`Migration ${migration.id} produced invalid foreign keys`);
+        }
+        sqlite.prepare("INSERT INTO _migrations (id, applied_at) VALUES (?, ?)").run(migration.id, new Date().toISOString());
+      })();
+    } finally {
+      if (migration.disableForeignKeys) sqlite.pragma("foreign_keys = ON");
+    }
   }
 }

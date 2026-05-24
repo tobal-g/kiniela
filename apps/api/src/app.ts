@@ -5,10 +5,10 @@ import { and, eq } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import type { Logger } from "pino";
 import { z } from "zod";
-import type { PublicUser } from "@kiniela/shared";
+import type { PublicUser, ScoreBreakdownDto } from "@kiniela/shared";
 import type { Env } from "./config/env.js";
 import type { AppDatabase } from "./db/client.js";
-import { bets, inviteCodes, matches, teams, users } from "./db/schema.js";
+import { bets, inviteCodes, matches, scores, teams, users } from "./db/schema.js";
 import { sha256, randomToken } from "./auth/crypto.js";
 import { hashPassword, verifyPassword } from "./auth/password.js";
 import {
@@ -23,14 +23,8 @@ import {
 import { createInviteSchema, betSchema, loginSchema, parseJson, signupSchema } from "./http/schemas.js";
 import { httpError } from "./http/errors.js";
 import { serializeMatch } from "./http/serializers.js";
-import { outcomeFromGoals } from "./scoring.js";
-import {
-  getScoringSettings,
-  scoringSettingsUpdateSchema,
-  serializeScoringSettings,
-  updateScoringSettings
-} from "./scoringSettings.js";
-import { recalculateFinishedScores, syncWorldCupFixtures } from "./integrations/apiFootball.js";
+import { outcomeFromGoals, SCORING_RULES } from "./scoring.js";
+import { syncWorldCupFixtures } from "./integrations/apiFootball.js";
 import { safeErrorMessage } from "./logging.js";
 
 export interface BuildAppInput {
@@ -77,7 +71,6 @@ export function buildApp(input: BuildAppInput) {
   // friends game, not an open public app.
   app.post("/auth/signup", async (request, reply) => {
     const body = parseJson(signupSchema, request.body);
-    const email = body.email.trim().toLowerCase();
     const now = new Date().toISOString();
     const codeHash = sha256(body.inviteCode.trim());
 
@@ -92,14 +85,13 @@ export function buildApp(input: BuildAppInput) {
       throw httpError(400, "Invalid invite code");
     }
 
-    const existing = input.database.db.select().from(users).where(eq(users.email, email)).limit(1).get();
-    if (existing) throw httpError(409, "Email already registered");
+    const existing = input.database.db.select().from(users).where(eq(users.name, body.name)).limit(1).get();
+    if (existing) throw httpError(409, "Name already registered");
 
     const passwordHash = await hashPassword(body.password);
     const user = {
       id: randomUUID(),
-      email,
-      name: body.name.trim(),
+      name: body.name,
       passwordHash,
       role: invite.role,
       createdAt: now,
@@ -122,11 +114,10 @@ export function buildApp(input: BuildAppInput) {
 
   app.post("/auth/login", async (request, reply) => {
     const body = parseJson(loginSchema, request.body);
-    const email = body.email.trim().toLowerCase();
-    const user = input.database.db.select().from(users).where(eq(users.email, email)).limit(1).get();
+    const user = input.database.db.select().from(users).where(eq(users.name, body.name)).limit(1).get();
 
     if (!user || !(await verifyPassword(user.passwordHash, body.password))) {
-      throw httpError(401, "Invalid email or password");
+      throw httpError(401, "Invalid name or password");
     }
 
     const session = await createSession(input.database, user.id);
@@ -171,20 +162,7 @@ export function buildApp(input: BuildAppInput) {
     // Once kickoff has passed, bets cannot be changed.
     if (new Date(match.kickoffAt).getTime() <= Date.now()) throw httpError(409, "Bet is locked");
 
-    if (
-      body.predictedAdvancerTeamId !== null &&
-      body.predictedAdvancerTeamId !== undefined &&
-      body.predictedAdvancerTeamId !== match.homeTeamId &&
-      body.predictedAdvancerTeamId !== match.awayTeamId
-    ) {
-      throw httpError(400, "Predicted advancer must be one of the match teams");
-    }
-
-    const settings = await getScoringSettings(input.database);
-    // If boosters are disabled in settings, the frontend may still send the
-    // field, but the backend ignores it.
-    const boosterUsed = settings.boostersEnabled ? body.boosterUsed : false;
-    if (boosterUsed) enforceBoosterLimit(input.database, user.id, params.matchId, settings.boostersPerUser);
+    validateBetPrediction(match, body);
 
     const now = new Date().toISOString();
     const existing = input.database.db
@@ -202,7 +180,6 @@ export function buildApp(input: BuildAppInput) {
       predictedAwayGoals: body.predictedAwayGoals,
       predictedOutcome: outcomeFromGoals(body.predictedHomeGoals, body.predictedAwayGoals),
       predictedAdvancerTeamId: body.predictedAdvancerTeamId ?? null,
-      boosterUsed,
       createdAt: existing?.createdAt ?? now,
       updatedAt: now
     };
@@ -214,7 +191,6 @@ export function buildApp(input: BuildAppInput) {
         predictedAwayGoals: row.predictedAwayGoals,
         predictedOutcome: row.predictedOutcome,
         predictedAdvancerTeamId: row.predictedAdvancerTeamId,
-        boosterUsed: row.boosterUsed,
         updatedAt: row.updatedAt
       }
     }).run();
@@ -228,6 +204,19 @@ export function buildApp(input: BuildAppInput) {
     return { bets: userBets.map(serializeBet) };
   });
 
+  app.get("/scores/me", async (request) => {
+    const user = requireUser(request.user);
+    const userScores = input.database.db.select().from(scores).where(eq(scores.userId, user.id)).orderBy(scores.matchId).all();
+    return {
+      scores: userScores.map((score) => ({
+        matchId: score.matchId,
+        totalPoints: score.totalPoints,
+        breakdown: JSON.parse(score.breakdownJson) as ScoreBreakdownDto,
+        calculatedAt: score.calculatedAt
+      }))
+    };
+  });
+
   app.get("/leaderboard", async (request) => {
     requireUser(request.user);
     const rows = input.database.sqlite
@@ -235,57 +224,47 @@ export function buildApp(input: BuildAppInput) {
         `
           SELECT
             users.id,
-            users.email,
             users.name,
             users.role,
             COALESCE(SUM(scores.total_points), 0) AS totalPoints,
             COUNT(scores.id) AS playedMatches,
             SUM(CASE WHEN json_extract(scores.breakdown_json, '$.exactScore') > 0 THEN 1 ELSE 0 END) AS exactScores,
-            SUM(CASE WHEN json_extract(scores.breakdown_json, '$.correctOutcome') > 0 THEN 1 ELSE 0 END) AS correctOutcomes
+            SUM(CASE WHEN json_extract(scores.breakdown_json, '$.correctResult') > 0 THEN 1 ELSE 0 END) AS correctResults
           FROM users
           LEFT JOIN scores ON scores.user_id = users.id
           WHERE users.role = 'player'
           GROUP BY users.id
-          ORDER BY totalPoints DESC, exactScores DESC, correctOutcomes DESC, users.name ASC
+          ORDER BY totalPoints DESC, exactScores DESC, correctResults DESC, users.name ASC
         `
       )
       .all() as Array<{
       id: string;
-      email: string;
       name: string;
       role: "player";
       totalPoints: number;
       playedMatches: number;
       exactScores: number | null;
-      correctOutcomes: number | null;
+      correctResults: number | null;
     }>;
 
     return {
       leaderboard: rows.map((row) => ({
-        user: { id: row.id, email: row.email, name: row.name, role: row.role },
+        user: { id: row.id, name: row.name, role: row.role },
         totalPoints: row.totalPoints,
         exactScores: row.exactScores ?? 0,
-        correctOutcomes: row.correctOutcomes ?? 0,
+        correctResults: row.correctResults ?? 0,
         playedMatches: row.playedMatches
       }))
     };
   });
 
-  app.get("/scoring-settings", async (request) => {
+  app.get("/scoring-rules", async (request) => {
     requireUser(request.user);
-    return { scoringSettings: serializeScoringSettings(await getScoringSettings(input.database)) };
+    return { scoringRules: SCORING_RULES };
   });
 
-  // Admin routes are for setup and tournament maintenance: invites, scoring
-  // tweaks, users, and syncing the World Cup data provider.
-  app.put("/admin/scoring-settings", async (request) => {
-    requireAdmin(request.user);
-    const body = parseJson(scoringSettingsUpdateSchema, request.body);
-    const updated = await updateScoringSettings(input.database, body);
-    await recalculateFinishedScores(input.database);
-    return { scoringSettings: serializeScoringSettings(updated) };
-  });
-
+  // Admin routes are for setup and tournament maintenance: invites, users,
+  // and syncing the World Cup data provider.
   app.post("/admin/invites", async (request) => {
     const user = requireAdmin(request.user);
     const body = parseJson(createInviteSchema, request.body);
@@ -355,16 +334,36 @@ function serializeBet(bet: typeof bets.$inferSelect) {
     predictedAwayGoals: bet.predictedAwayGoals,
     predictedOutcome: bet.predictedOutcome,
     predictedAdvancerTeamId: bet.predictedAdvancerTeamId,
-    boosterUsed: bet.boosterUsed,
     createdAt: bet.createdAt,
     updatedAt: bet.updatedAt
   };
 }
 
-function enforceBoosterLimit(database: AppDatabase, userId: string, matchId: number, boostersPerUser: number): void {
-  const row = database.sqlite
-    .prepare("SELECT COUNT(*) AS count FROM bets WHERE user_id = ? AND booster_used = 1 AND match_id != ?")
-    .get(userId, matchId) as { count: number };
+function validateBetPrediction(
+  match: typeof matches.$inferSelect,
+  prediction: { predictedHomeGoals: number; predictedAwayGoals: number; predictedAdvancerTeamId?: number | null }
+): void {
+  if (match.stage === "unknown") throw httpError(400, "Predictions are unavailable until the match stage is known");
+  if (match.homeTeamId === null || match.awayTeamId === null) {
+    throw httpError(400, "Predictions are unavailable until both match teams are known");
+  }
 
-  if (row.count >= boostersPerUser) throw httpError(409, "Booster limit reached");
+  const advancerTeamId = prediction.predictedAdvancerTeamId ?? null;
+  if (match.stage === "group") {
+    if (advancerTeamId !== null) throw httpError(400, "Group-stage predictions cannot include an advancing team");
+    return;
+  }
+
+  if (advancerTeamId === null) throw httpError(400, "Knockout predictions require an advancing team");
+  if (advancerTeamId !== match.homeTeamId && advancerTeamId !== match.awayTeamId) {
+    throw httpError(400, "Predicted advancer must be one of the match teams");
+  }
+
+  const outcome = outcomeFromGoals(prediction.predictedHomeGoals, prediction.predictedAwayGoals);
+  if (outcome === "HOME" && advancerTeamId !== match.homeTeamId) {
+    throw httpError(400, "Predicted advancer must match the team winning the predicted score");
+  }
+  if (outcome === "AWAY" && advancerTeamId !== match.awayTeamId) {
+    throw httpError(400, "Predicted advancer must match the team winning the predicted score");
+  }
 }

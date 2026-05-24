@@ -3,14 +3,13 @@ import { z } from "zod";
 // Request bodies accepted by the API. These are intentionally close to what
 // the frontend sends, so validation errors are easier to map to form fields.
 export const signupSchema = z.object({
-  email: z.string().email(),
-  name: z.string().min(1).max(120),
+  name: z.string().trim().min(1).max(120),
   password: z.string().min(12).max(256),
   inviteCode: z.string().min(12).max(128)
 });
 
 export const loginSchema = z.object({
-  email: z.string().email(),
+  name: z.string().trim().min(1).max(120),
   password: z.string().min(1).max(256)
 });
 
@@ -26,9 +25,8 @@ export const betSchema = z.object({
   predictedHomeGoals: z.number().int().min(0).max(30),
   predictedAwayGoals: z.number().int().min(0).max(30),
   // For knockout matches, this is the team the player thinks will advance.
-  // It can be omitted or null for group-stage matches.
-  predictedAdvancerTeamId: z.number().int().positive().nullable().optional(),
-  boosterUsed: z.boolean().default(false)
+  // It is validated against the match stage after this body is parsed.
+  predictedAdvancerTeamId: z.number().int().positive().nullable().optional()
 });
 
 export function parseJson<T>(schema: z.ZodType<T>, value: unknown): T {
